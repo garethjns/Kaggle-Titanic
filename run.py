@@ -1,23 +1,14 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu May  4 20:14:20 2017
-
-@author: Gareth
-"""
-
+# See also: https://www.kaggle.com/garethjns/microsoft-lightgbm-0-795
+# This version should score around 0.822 (top ~3%)
 
 #%% Imports
-
 # The usuals
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Regular expressions for handelling string features
+# Regular expressions (urrggghhhhhhhhh) for handling string features
 import re
-
-# LabelEncoder for handelling categorical features (and names)
-from sklearn.preprocessing import LabelEncoder
 
 # LightGBM
 import lightgbm as lgb
@@ -29,10 +20,9 @@ from sklearn.model_selection import GridSearchCV
 
 
 #%% Import data
-
 # Import both data sets
-trainRaw = pd.read_csv('train.csv')
-testRaw = pd.read_csv('test.csv')
+trainRaw = pd.read_csv('../input/train.csv')
+testRaw = pd.read_csv('../input/test.csv')
 
 # And concatonate together
 nTrain = trainRaw.shape[0]
@@ -40,11 +30,10 @@ full = pd.concat([trainRaw, testRaw], axis=0)
 
 
 #%% Cabins
-
 def ADSplit(s):
     """
     Function to try and extract cabin letter and number from the cabin column.
-    Runs a regular expression (urgh) that finds letters and numbers in the 
+    Runs a regular expression that finds letters and numbers in the 
     string. These are held in match.group, if they exist.
     """
 
@@ -67,7 +56,6 @@ def DR(s):
     """
     From the cabin string, try and extract letter, number, and number of cabins
     """
-    
     # Check contents
     if isinstance(s, (int, float)):
         # If field is empty, return nothing
@@ -99,7 +87,6 @@ full = pd.concat([full, out], axis=1)
     
 
 #%% Family 
-
 # Add some family features directly to new columns in the dataset
 # Size
 full['fSize'] = full['SibSp'] + full['Parch'] + 1
@@ -108,10 +95,9 @@ full['fRatio'] = (full['Parch']+1) / (full['SibSp']+ 1)
 # Adult?
 full['Adult'] = full['Age']>18    
 
-    
+
 #%% Names
 # Extract titles from Name column, standardise
-
 titleDict = {
     "Capt": "Officer",
     "Col": "Officer",
@@ -169,9 +155,8 @@ out.columns = ['Surname', 'Title']
   
 full = pd.concat([full, out], axis=1)
 
-    
-#%% Categorical columns
 
+#%% Categorical columns
 # List of categorical columns to recode
 catCols = ['Sex', 'Embarked', 'CL', 'CN', 'Surname', 'Title']
 
@@ -185,47 +170,22 @@ for c in catCols:
     full[c] = pd.Categorical(full[c])
 
 
-# Generate a logical index of categorical columns to use with LightGBM later
+# Generate a logical index of categorical columns to maybe use with LightGBM later
 catCols = [i for i,v in enumerate(full.dtypes) if str(v)=='category']
 
 
 #%% Age
-
 # Replace missing age values with median. 
 # See ither kernels for more sophisticated ways of doing this!
 full.loc[full.Age.isnull(), 'Age'] = np.median(full['Age'].loc[full.Age.notnull()])
 
 
-#%% Tickets (not using here)
-"""
-def tix_clean(j):
-    j = j.replace(".", "")
-    j = j.replace("/", "")
-    j = j.replace(" ", "")
-    return j
-
-
-def tix_label(s):
-    if (s >= 2) & (s <= 4):
-        return 2
-    elif ((s > 4) & (s <= 8)) | (s == 1):
-        return 1
-    elif (s > 8):
-        return 0
-    
-    
-out = full['Ticket'].apply(tix_clean)
-out = full['TicketLab'].apply(tix_label)
-full = pd.concat([full, out], axis=1)
-"""
-
-#%% 
+#%% Split datasets
 train = full.iloc[0:nTrain,:]
 test = full.iloc[nTrain::,:]
 
 
-#%% 
-
+#%% Prepare data
 def prepLGB(data, classCol = '', IDCol = '', fDrop = []):
     
         # Drop class column
@@ -237,43 +197,34 @@ def prepLGB(data, classCol = '', IDCol = '', fDrop = []):
     
         if IDCol != '':
             IDs = data[IDCol]
+        else:
+            IDs = []
 
         if fDrop != []:
            data =  data.drop(fDrop, axis=1)
        
         # Create LGB mats        
-        lData = lgb.Dataset(np.array(data), label=labels, free_raw_data=False, 
+        lData = lgb.Dataset(data, label=labels, free_raw_data=False, 
                             feature_name=list(data.columns),
                             categorical_feature = 'auto')
         
         return lData, labels, IDs, data
+
         
-
-"""
-train.columns
-Index(['PassengerId', 'Survived', 'Pclass', 'Name', 'Sex', 'Age', 'SibSp',
-       'Parch', 'Ticket', 'Fare', 'Cabin', 'Embarked'],
-      dtype='object')
-"""
-
+# Specify columns to drop
 fDrop = ['Ticket', 'Cabin', 'Name']
 
-
+# Split training data in to training and validation sets. 
+# Validation set is used for early stopping.
 trainData, validData = train_test_split(train, test_size=0.4)
 
-
+# Prepare the data sets
 trainDataL, trainLabels, trainIDs, trainData = prepLGB(trainData, 
                                                  classCol = 'Survived', 
                                                  IDCol = 'PassengerId',
                                                  fDrop = fDrop)
                                                  
-
 validDataL, validLabels, validIDs, validData = prepLGB(validData, 
-                                                 classCol = 'Survived', 
-                                                 IDCol = 'PassengerId',
-                                                 fDrop = fDrop)
-
-allTrainDataL, allTrainLabels, _ , allTrainData = prepLGB(train, 
                                                  classCol = 'Survived', 
                                                  IDCol = 'PassengerId',
                                                  fDrop = fDrop)
@@ -282,99 +233,20 @@ testDataL, _, _ , testData = prepLGB(test,
                                  classCol = 'Survived', 
                                  IDCol = 'PassengerId',
                                  fDrop = fDrop)
+                                 
+# Prepare data set using all the training data
+allTrainDataL, allTrainLabels, _ , allTrainData = prepLGB(train, 
+                                                 classCol = 'Survived', 
+                                                 IDCol = 'PassengerId',
+                                                 fDrop = fDrop)
 
-
-#%% 
-
-# Create a set if parameters
-params = {'boosting_type': 'gbdt',
-          'max_depth' : 4,
-          'min_data_in_leaf' : 20,
-          'objective': 'binary', 
-          'nthread': 5, 
-          'silent': True,
-          'num_leaves': 128, 
-          'learning_rate': 0.05, 
-          'max_bin': 512, 
-          'subsample_for_bin': 200,
-          'subsample': 1, 
-          'subsample_freq': 1, 
-          'colsample_bytree': 0.8, 
-          'reg_alpha': 5, 
-          'reg_lambda': 10,
-          'min_split_gain': 0.5, 
-          'min_child_weight': 1, 
-          'min_child_samples': 5, 
-          'scale_pos_weight': 1,
-          'num_class' : 1,
-          'metric' : 'binary_error'}
-          
-params = {'metric' : 'binary_error'}
-# Run k-fold crossvalidation on all the training data to see how they perform
-cv_results = lgb.cv(params, 
-                     allTrainDataL, # Using all training data
-                     num_boost_round = 10000, 
-                     categorical_feature = catCols, # Specify categorical cols
-                     nfold = 20, 
-                     stratified = False, 
-                     shuffle = True, 
-                     early_stopping_rounds = 20, 
-                     verbose_eval = 1, 
-                     show_stdv = True, 
-                     seed = 0)
-
-plt.errorbar(x=range(0, len(cv_results['binary_error-mean'])),
-             y=cv_results['binary_error-mean'], 
-             yerr=cv_results['binary_error-stdv'])
-plt.show()
-
-#%% 
-    
-# Scores ~0.784    
+# Set params
+# Scores ~0.784 (without tuning and early stopping)    
 params = {'boosting_type': 'gbdt',
           'max_depth' : -1,
           'objective': 'binary', 
           'nthread': 5, 
-          'silent': True,
-          'num_leaves':  6,
-          'learning_rate': 0.05, 
-          'max_bin': 512, 
-          'subsample_for_bin': 200,
-          'subsample': 1, 
-          'subsample_freq': 1, 
-          'colsample_bytree': 0.8, 
-          'reg_alpha': 5, 
-          'reg_lambda': 10,
-          'min_split_gain': 0.5, 
-          'min_child_weight': 1, 
-          'min_child_samples': 5, 
-          'scale_pos_weight': 1,
-          'num_class' : 1,
-          'metric' : 'binary_error'}
-            
-gbm = lgb.train(params, 
-                trainDataL, 
-                100000, 
-                valid_sets=[trainDataL, validDataL],
-                early_stopping_rounds = 16,
-                verbose_eval=4)
-
-lgb.plot_importance(gbm)
-predsValid = gbm.predict(validData, num_iteration=gbm.best_iteration)
-predsTrain = gbm.predict(trainData, num_iteration=gbm.best_iteration)
-predsTest = gbm.predict(testData, num_iteration=gbm.best_iteration)
-
-
-#%% Different params
-
-# Scores?
-params = {'boosting_type': 'gbdt',
-          'max_depth' : 50,
-          'min_data_in_leaf' : 12,
-          'objective': 'binary', 
-          'nthread': 5, 
-          'silent': True,
-          'num_leaves': 128, 
+          'num_leaves': 64, 
           'learning_rate': 0.05, 
           'max_bin': 512, 
           'subsample_for_bin': 200,
@@ -390,238 +262,99 @@ params = {'boosting_type': 'gbdt',
           'num_class' : 1,
           'metric' : 'binary_error'}
 
-gbm = lgb.train(params, 
-                trainDataL, 
-                100000, 
-                valid_sets=[trainDataL, validDataL],
-                early_stopping_rounds = 50,
-                verbose_eval=4)
-
-lgb.plot_importance(gbm)
-predsValid = gbm.predict(validData, num_iteration=gbm.best_iteration)
-predsTrain = gbm.predict(trainData, num_iteration=gbm.best_iteration)
-predsTest = gbm.predict(testData, num_iteration=gbm.best_iteration)
-
-
-
-#%%
-
-def assessMod(predsTrain, yTrain, predsValid=[], yValid=[], 
-              report=True, plot=True):
-    """
-    Using sklearn functions, return accuracy and ROC metrics (tpr, fpr, auc)
-    for training data and validation data (if included).
-    
-    preds should be model preditions, yTrain and yValid should be labels.
-    
-    """
-    trainAcc = accuracy_score(yTrain, np.round(predsTrain))
-    fprTrain, tprTrain, thresholdsTrain = roc_curve(yTrain, predsTrain)
-    trainAUC =  auc(fprTrain, tprTrain)
-    
-    if predsValid != []:
-        accuracy_score(yValid, np.round(predsValid))
-        fprValid, tprValid, thresholdsValid = roc_curve(yValid, predsValid)
-        validAcc = accuracy_score(yValid, np.round(predsValid))
-        validAUC = auc(fprValid, tprValid)
-    else: 
-        validAcc = np.nan
-        fprValid = np.nan
-        tprValid = np.nan
-        validAUC = np.nan
-   
-    if report:
-        print('Train accuracy:', trainAcc, '| Train AUC:', 
-             trainAUC)
-        if not isinstance(predsValid, list):
-            print('Validation accuracy:', validAcc, '| Test AUC:', 
-                  validAUC)
-        
-        print('-'*30)
-    
-    # Plot
-    if plot:
-        plotROC(tprTrain, fprTrain, label='Train')
-        if not isinstance(predsValid, list):
-            plotROC(tprValid, fprValid, label='Valid')
-      
-    # Stats output
-    stats = {'fprTrain' : fprTrain,
-             'fprValid' : fprValid,
-             'tprTrain' : tprTrain,
-             'tprValid' : tprValid,
-             'trainAcc' : trainAcc,
-             'validAcc' : validAcc,
-             'trainAUC' : trainAUC,
-             'validAUC' : validAUC}
-
-    return stats
-  
-    
-def plotROC(tpr, fpr, label=''):
-    """
-    Plot ROC curve from tpr and fpr.
-    """
-    plt.plot(fpr, tpr, label=label)
-    plt.legend()
-    plt.ylabel('True positive rate.')
-    plt.xlabel('False positive rate')
-    plt.show()
-
-
-# Report model performance on training and validation sets                       
-assessMod(predsTrain, trainLabels, 
-          predsValid = predsValid, yValid = validLabels, 
-          report=True, plot=True)               
-                       
-#%% Save sub
-
-
-sub = pd.DataFrame()
-sub['PassengerId'] = test['PassengerId']
-sub['Survived'] = np.int32(predsTest>0.5)
-sub.to_csv('sub.csv', index=False)
-                       
-
-#%% 
-
-
-
+# Create parameters to search
 gridParams = {
-    'learning_rate': [0.0005],
-    'n_estimators': [12,24],
-    'num_leaves': [20,30],
+    'learning_rate': [0.01],
+    'n_estimators': [8,24],
+    'num_leaves': [6,8,12,16],
     'boosting_type' : ['gbdt'],
     'objective' : ['binary'],
     'seed' : [500],
-    'colsample_bytree' : [0.7,0.8],
-    'subsample' : [0.7,1],
-    'reg_alpha' : [0,0.5],
-    'reg_lambda' : [0,1,5],
+    'colsample_bytree' : [0.65, 0.75, 0.8],
+    'subsample' : [0.7,0.75],
+    'reg_alpha' : [1,2,6],
+    'reg_lambda' : [1,2,6],
     }
 
-gridParams = {
-    'learning_rate': [0.1, 0.02],
-    'num_leaves': [5,6,7,20],
-    'max_depth': [-1,12,24,48],
-    'n_estimators' : [20, 40, 45, 50, 55, 60, 75],
-    'boosting_type' : ['gbdt'],
-    'objective' : ['binary'],
-    'seed' : [500],
-    'colsample_bytree' : [0.65, 0.7, 0.75],
-    'subsample' : [0.65, 0.7, 0.75],
-    'reg_alpha' : [1, 10],
-    'reg_lambda' : [1, 6, 10],
-    'subsample_for_bin': [100, 150, 200, 220, 300],
-    'max_bin': [32,64] 
-    }
-
-
-
+# Create classifier to use. Note that parameters have to be input manually
+# not as a dict!
 mdl = lgb.LGBMClassifier(boosting_type= 'gbdt', 
-          objective='binary', 
-          nthread= 5, 
-          silent= True,
-          max_depth= -1,
-          max_bin= 128, 
-          subsample_for_bin= 500,
-          subsample= 1, 
-          subsample_freq= 1, 
-          min_split_gain = 0.5, 
-          min_child_weight = 1, 
-          min_child_samples = 5, 
-          scale_pos_weight = 1)
+          objective = 'binary', 
+          nthread = 5, 
+          silent = True,
+          max_depth = params['max_depth'],
+          max_bin = params['max_bin'], 
+          subsample_for_bin = params['subsample_for_bin'],
+          subsample = params['subsample'], 
+          subsample_freq = params['subsample_freq'], 
+          min_split_gain = params['min_split_gain'], 
+          min_child_weight = params['min_child_weight'], 
+          min_child_samples = params['min_child_samples'], 
+          scale_pos_weight = params['scale_pos_weight'])
 
+# To view the default model params:
 mdl.get_params().keys()
+
+# Create the grid
 grid = GridSearchCV(mdl, gridParams, verbose=1, cv=4, n_jobs=-1)
+# Run the grid
 grid.fit(allTrainData, allTrainLabels)
 
+# Print the best parameters found
+print(grid.best_params_)
+print(grid.best_score_)
 
-grid.grid_scores_, grid.best_params_, grid.best_score_
+# Using parameters already set above, replace in the best from the grid search
+params['colsample_bytree'] = grid.best_params_['colsample_bytree']
+params['learning_rate'] = grid.best_params_['learning_rate'] 
+# params['max_bin'] = grid.best_params_['max_bin']
+params['num_leaves'] = grid.best_params_['num_leaves']
+params['reg_alpha'] = grid.best_params_['reg_alpha']
+params['reg_lambda'] = grid.best_params_['reg_lambda']
+params['subsample'] = grid.best_params_['subsample']
+# params['subsample_for_bin'] = grid.best_params_['subsample_for_bin']
 
-params2 =  grid.best_params_
+# Kit k models with early-stopping on different training/validation splits
+k = 5;
+predsValid = 0 
+predsTrain = 0
+predsTest = 0
+for i in range(0, k): 
+    print('Fitting model', k)
+    
+    # Prepare the data set for fold
+    trainData, validData = train_test_split(train, test_size=0.4)
+    trainDataL, trainLabels, trainIDs, trainData = prepLGB(trainData, 
+                                                     classCol = 'Survived', 
+                                                     IDCol = 'PassengerId',
+                                                     fDrop = fDrop)
+    validDataL, validLabels, validIDs, validData = prepLGB(validData, 
+                                                     classCol = 'Survived', 
+                                                     IDCol = 'PassengerId',
+                                                     fDrop = fDrop)
+    # Train     
+    gbm = lgb.train(params, 
+                    trainDataL, 
+                    100000, 
+                    valid_sets=[trainDataL, validDataL],
+                    early_stopping_rounds = 50,
+                    verbose_eval=4)
 
+    # Plot importance
+    lgb.plot_importance(gbm)
+    plt.show()
+    
+    # Predict
+    predsValid += gbm.predict(validData, num_iteration=gbm.best_iteration)/k
+    predsTrain += gbm.predict(trainData, num_iteration=gbm.best_iteration)/k
+    predsTest += gbm.predict(testData, num_iteration=gbm.best_iteration)/k
 
-#%% Retrain
+# Print assessment
+# assessMod(predsTrain, trainLabels, predsValid=predsValid, yValid= validLabels, 
+#           report=True, plot=True)               
 
-
-best_params_   = {'boosting_type': 'gbdt',
- 'colsample_bytree': 0.7,
- 'learning_rate': 0.1,
- 'max_bin': 32,
- 'max_depth': -1,
- 'n_estimators': 50,
- 'num_leaves': 6,
- 'objective': 'binary',
- 'reg_alpha': 1,
- 'reg_lambda': 1,
- 'seed': 500,
- 'subsample': 0.7,
- 'subsample_for_bin': 200}
-
-
-params = {'boosting_type': 'gbdt', 
-          'objective': 'binary', 
-          'nthread': 5, 
-          'silent': True,
-          'num_leaves': 128, 
-          'learning_rate': 0.005, 
-          'max_depth': -1,
-          'max_bin': 512, 
-          'subsample_for_bin': 200,
-          'subsample': 1, 
-          'subsample_freq': 1, 
-          'colsample_bytree': 0.8, 
-          'reg_alpha': 5, 
-          'reg_lambda': 10,
-          'min_split_gain': 0.5, 
-          'min_child_weight': 1, 
-          'min_child_samples': 5, 
-          'scale_pos_weight': 1,
-          'num_class' : 1,
-          'metric' : 'binary_error'}
-
-params['colsample_bytree'] = best_params_['colsample_bytree']
-params['learning_rate'] = best_params_['learning_rate'] 
-params['max_bin'] = best_params_['max_bin']
-params['num_leaves'] = best_params_['num_leaves']
-params['reg_alpha'] = best_params_['reg_alpha']
-params['reg_lambda'] = best_params_['reg_lambda']
-params['subsample'] = best_params_['subsample']
-params['subsample_for_bin'] = best_params_['subsample_for_bin']
- 
-
-      
-gbm = lgb.train(params, 
-                trainDataL, 
-                100000, 
-                valid_sets=[trainDataL, validDataL],
-                early_stopping_rounds = 50,
-                verbose_eval=4)
-
-"""
-gbm = lgb.train(params, 
-                allTrainDataL, 
-                100, 
-                valid_sets=[trainDataL, validDataL],
-                #early_stopping_rounds = 12,
-                verbose_eval=4)
-"""
-
-lgb.plot_importance(gbm)
-plt.show()
-predsValid = gbm.predict(validData, num_iteration=gbm.best_iteration)
-predsTrain = gbm.predict(trainData, num_iteration=gbm.best_iteration)
-predsTest = gbm.predict(testData, num_iteration=gbm.best_iteration)
-
-assessMod(predsTrain, trainLabels, predsValid=predsValid, yValid= validLabels, 
-          report=True, plot=True)               
-
-
-# Scores 0.79 
+# Save submission
 sub = pd.DataFrame()
 sub['PassengerId'] = test['PassengerId']
 sub['Survived'] = np.int32(predsTest>0.5)
-sub.to_csv('sub.csv', index=False)                       
-
-
+sub.to_csv('sub2.csv', index=False)         
