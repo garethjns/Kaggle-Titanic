@@ -9,7 +9,7 @@ A tongue-in-cheek look at removing the gender bias in the dataset, includes:
 See also: https://www.kaggle.com/garethjns/titanicsexism-fairness-in-ml
 
 ## [Shortest Titanic kernel](https://github.com/garethjns/Kaggle-Titanic/blob/master/shortest-titanic-kernel.ipynb)
-A fork of [this kernel](https://www.kaggle.com/pavlofesenko/shortest-titanic-kernel-0-78468). Attempts to create a reasonably scoring model using the least code possible. A great example of how not to programme badly.   
+A fork of [this kernel](https://www.kaggle.com/pavlofesenko/shortest-titanic-kernel-0-78468). Attempts to create a reasonably scoring model using the least code possible. A great example of how not to programme.   
 See also: https://www.kaggle.com/garethjns/shortest-titanic-kernel-0-78468
 
 ## LightGBM
