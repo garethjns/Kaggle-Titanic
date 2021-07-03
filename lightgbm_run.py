@@ -1,125 +1,68 @@
-# See also: https://www.kaggle.com/garethjns/microsoft-lightgbm-0-795
-# This version should score around 0.822 (top ~3%)
+"""
+This script fits a LightGBM model with "optimal" params on the Titanic dataset. It uses a gridsearch to find a
+reasonable set of parameters, then fits a number of models with different subsets of the training data with these
+params (and using early stopping). This technique can improve prediction stability for noisy datasets.
 
-# Regular expressions (urrggghhhhhhhhh) for handling string features
+Note that the preprocessing here is done on the combined train and test sets. In the real world this is bad practice,
+but here know we'll never see any new data, so it's fine.
+
+See also: https://www.kaggle.com/garethjns/microsoft-lightgbm-0-795
+This version can score around 0.822 (top ~3%), but anything ~0.77 or above is due to overfitting or luck :)
+"""
+
 import re
+from typing import Tuple, Union, Dict, List, Optional
 
-# LightGBM
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
-# %% Imports
-# The usuals
 import pandas as pd
 from sklearn.model_selection import GridSearchCV
-# sklearn tools for model training and assesment
 from sklearn.model_selection import train_test_split
 
-# %% Import data
-# Import both data sets
-trainRaw = pd.read_csv('../input/train.csv')
-testRaw = pd.read_csv('../input/test.csv')
 
-# And concatonate together
-nTrain = trainRaw.shape[0]
-full = pd.concat([trainRaw, testRaw], axis=0)
-
-
-# %% Cabins
-def ADSplit(s):
+def split_cabin_str(s: str) -> Tuple[str, float]:
     """
     Function to try and extract cabin letter and number from the cabin column.
-    Runs a regular expression that finds letters and numbers in the 
+    Runs a regular expression that finds letters and numbers in the
     string. These are held in match.group, if they exist.
     """
 
     match = re.match(r"([a-z]+)([0-9]+)", s, re.I)
 
-    try:
+    letter = ''
+    number = -1.0
+    if match is not None:
         letter = match.group(1)
-    except:
-        letter = ''
-
-    try:
         number = match.group(2)
-    except:
-        number = 9999
 
     return letter, number
 
 
-def DR(s):
-    """
-    From the cabin string, try and extract letter, number, and number of cabins
-    """
+def process_cabin(s: Union[str, float]) -> Tuple[str, float, int]:
+    """From a cabin string, try and extract letter, number, and number of cabins."""
     # Check contents
-    if isinstance(s, (int, float)):
+    if not isinstance(s, str):
         # If field is empty, return nothing
         letter = ''
         number = ''
-        nRooms = 9999
+        n_rooms = -1.0
     else:
-        # If field isn't empty, split sting on space. Some strings contain 
+        # If field isn't empty, split sting on space. Some strings contain
         # multiple cabins.
         s = s.split(' ')
         # Count the cabins based on number of splits
-        nRooms = len(s)
+        n_rooms = len(s)
         # Just take first cabin for letter/number extraction
         s = s[0]
 
-        letter, number = ADSplit(s)
+        letter, number = split_cabin_str(s)
 
-    return [letter, number, nRooms]
-
-
-# Apply DR function to each cell in Cabin column using pandas apply method.
-out = full['Cabin'].apply(DR)
-# Outout tuple with 3 values for each row, convert this to pandas df
-out = out.apply(pd.Series)
-# And name the columns
-out.columns = ['CL', 'CN', 'nC']
-
-# Then concatenate these columns to the dataset
-full = pd.concat([full, out], axis=1)
-
-# %% Family
-# Add some family features directly to new columns in the dataset
-# Size
-full['fSize'] = full['SibSp'] + full['Parch'] + 1
-# Ratio
-full['fRatio'] = (full['Parch'] + 1) / (full['SibSp'] + 1)
-# Adult?
-full['Adult'] = full['Age'] > 18
-
-# %% Names
-# Extract titles from Name column, standardise
-titleDict = {
-    "Capt": "Officer",
-    "Col": "Officer",
-    "Major": "Officer",
-    "Jonkheer": "Sir",
-    "Don": "Sir",
-    "Sir": "Sir",
-    "Dr": "Dr",
-    "Rev": "Rev",
-    "theCountess": "Lady",
-    "Dona": "Lady",
-    "Mme": "Mrs",
-    "Mlle": "Miss",
-    "Ms": "Mrs",
-    "Mr": "Mr",
-    "Mrs": "Mrs",
-    "Miss": "Miss",
-    "Master": "Master",
-    "Lady": "Lady"
-}
+    return letter, number, n_rooms
 
 
-def splitName(s, titleDict):
-    """
-    Extract title from name, replace with value in title dictionary. Also 
-    return surname.
-    """
+def split_name_str(s: str, title_map: Dict[str, str]) -> Tuple[str, str]:
+    """Extract title from name, replace with value in title dictionary and both title and surname."""
 
     # Remove '.' from name string
     s = s.replace('.', '')
@@ -128,12 +71,12 @@ def splitName(s, titleDict):
     # get surname
     surname = s[0]
 
-    # Get title - loop over titleDict, if s matches a key, take the 
+    # Get title - loop over title_map, if s matches a key, take the
     # corresponding value as the title
-    title = [t for k, t in titleDict.items() if str(k) in s]
+    title = [t for k, t in title_map.items() if str(k) in s]
 
     # If no matching keys in title dict, use 'Other'.
-    if title == []:
+    if len(title) == 0:
         title = 'Other'
     else:
         # Title is a list, so extract contents
@@ -143,208 +86,195 @@ def splitName(s, titleDict):
     return surname.strip(','), title
 
 
-# Apply functions to df and concatenate new columns as before
-out = full['Name'].apply(splitName, args=[titleDict])
-out = out.apply(pd.Series)
-out.columns = ['Surname', 'Title']
+def prepare_for_light_gbm(data, target_col: Optional[str] = None, id_col: Optional[str] = None,
+                          drop_cols: Optional[List[str]] = None) -> Tuple[lgb.Dataset, pd.Series,
+                                                                          pd.Series, pd.DataFrame]:
+    """
+    Prepare a dataframe containing processed titanic data for modelling.
 
-full = pd.concat([full, out], axis=1)
+    Creates a lbg.Dataset using the columns as specified.
 
-# %% Categorical columns
-# List of categorical columns to recode
-catCols = ['Sex', 'Embarked', 'CL', 'CN', 'Surname', 'Title']
-
-# Recode
-for c in catCols:
-    # Convert column to pd.Categotical
-    full[c] = pd.Categorical(full[c])
-    # Extract the cat.codes and replace the column with these
-    full[c] = full[c].cat.codes
-    # Convert the cat codes to categotical...    
-    full[c] = pd.Categorical(full[c])
-
-# Generate a logical index of categorical columns to maybe use with LightGBM later
-catCols = [i for i, v in enumerate(full.dtypes) if str(v) == 'category']
-
-# %% Age
-# Replace missing age values with median. 
-# See ither kernels for more sophisticated ways of doing this!
-full.loc[full.Age.isnull(), 'Age'] = np.median(full['Age'].loc[full.Age.notnull()])
-
-# %% Split datasets
-train = full.iloc[0:nTrain, :]
-test = full.iloc[nTrain::, :]
-
-
-# %% Prepare data
-def prepLGB(data, classCol='', IDCol='', fDrop=[]):
-    # Drop class column
-    if classCol != '':
-        labels = data[classCol]
-        fDrop = fDrop + [classCol]
+    :param data: Dataframe to process.
+    :param target_col: The column containing the labels/targets
+    :param id_col:
+    :param drop_cols: List of columns to drop.
+    :return: prepared lbb.Dataset.
+    """
+    # Drop target column
+    if target_col is not None:
+        labels = data[target_col]
+        drop_cols = drop_cols + [target_col]
     else:
         labels = []
 
-    if IDCol != '':
-        IDs = data[IDCol]
+    if id_col is not None:
+        ids = data[id_col]
+        drop_cols = drop_cols + [id_col]
     else:
-        IDs = []
+        ids = []
 
-    if fDrop != []:
-        data = data.drop(fDrop, axis=1)
+    if drop_cols is not None:
+        data = data.drop(drop_cols, axis=1)
 
     # Create LGB mats
-    lData = lgb.Dataset(data, label=labels, free_raw_data=False,
-                        feature_name=list(data.columns),
-                        categorical_feature='auto')
+    lgb_data = lgb.Dataset(data, label=labels, free_raw_data=False,
+                           feature_name=list(data.columns), categorical_feature='auto')
 
-    return lData, labels, IDs, data
+    return lgb_data, labels, ids, data
 
 
-# Specify columns to drop
-fDrop = ['Ticket', 'Cabin', 'Name']
+if __name__ == "__main__":
+    # Import both data sets
+    data_train = pd.read_csv('../input/train.csv')
+    data_test = pd.read_csv('../input/test.csv')
 
-# Split training data in to training and validation sets. 
-# Validation set is used for early stopping.
-trainData, validData = train_test_split(train, test_size=0.4)
+    # And concatenate together
+    n_train = data_train.shape[0]
+    data_joined = pd.concat([data_train, data_test], axis=0)
 
-# Prepare the data sets
-trainDataL, trainLabels, trainIDs, trainData = prepLGB(trainData,
-                                                       classCol='Survived',
-                                                       IDCol='PassengerId',
-                                                       fDrop=fDrop)
+    # Process cabins
+    # Apply process_cabin function to each row in 'Cabin' column individually using pandas apply method.
+    cabins = data_joined['Cabin'].apply(process_cabin)
+    # Output tuple has 3 values for each row, convert this to pandas df
+    cabins = cabins.apply(pd.Series)
+    # And name the columns
+    cabins.columns = ['cabin_letter', 'cabin_number', 'cabins_number_of']
 
-validDataL, validLabels, validIDs, validData = prepLGB(validData,
-                                                       classCol='Survived',
-                                                       IDCol='PassengerId',
-                                                       fDrop=fDrop)
+    # Then concatenate these columns to the dataset
+    data_joined = pd.concat([data_joined, cabins], axis=1)
 
-testDataL, _, _, testData = prepLGB(test,
-                                    classCol='Survived',
-                                    IDCol='PassengerId',
-                                    fDrop=fDrop)
+    # Process family
+    # Add some family features directly to new columns in the dataset
+    # Size
+    data_joined.loc[:, 'fSize'] = data_joined['SibSp'] + data_joined['Parch'] + 1
+    # Ratio
+    data_joined.loc[:, 'fRatio'] = (data_joined['Parch'] + 1) / (data_joined['SibSp'] + 1)
+    # Adult?
+    data_joined.loc[:, 'Adult'] = data_joined['Age'] > 18
 
-# Prepare data set using all the training data
-allTrainDataL, allTrainLabels, _, allTrainData = prepLGB(train,
-                                                         classCol='Survived',
-                                                         IDCol='PassengerId',
-                                                         fDrop=fDrop)
+    # Process titles
+    # Extract titles from Name column, standardise
+    title_map_ = {"Capt": "Officer", "Col": "Officer", "Major": "Officer", "Jonkheer": "Sir", "Don": "Sir",
+                  "Sir": "Sir", "Dr": "Dr", "Rev": "Rev", "theCountess": "Lady", "Dona": "Lady", "Mme": "Mrs",
+                  "Mlle": "Miss", "Ms": "Mrs", "Mr": "Mr", "Mrs": "Mrs", "Miss": "Miss", "Master": "Master",
+                  "Lady": "Lady"}
 
-# Set params
-# Scores ~0.784 (without tuning and early stopping)    
-params = {'boosting_type': 'gbdt',
-          'max_depth': -1,
-          'objective': 'binary',
-          'nthread': 5,
-          'num_leaves': 64,
-          'learning_rate': 0.05,
-          'max_bin': 512,
-          'subsample_for_bin': 200,
-          'subsample': 1,
-          'subsample_freq': 1,
-          'colsample_bytree': 0.8,
-          'reg_alpha': 5,
-          'reg_lambda': 10,
-          'min_split_gain': 0.5,
-          'min_child_weight': 1,
-          'min_child_samples': 5,
-          'scale_pos_weight': 1,
-          'num_class': 1,
-          'metric': 'binary_error'}
+    # Apply functions to df and concatenate new columns as before
+    cabins = data_joined['Name'].apply(split_name_str, args=[title_map_])
+    cabins = cabins.apply(pd.Series)
+    cabins.columns = ['Surname', 'Title']
 
-# Create parameters to search
-gridParams = {
-    'learning_rate': [0.01],
-    'n_estimators': [8, 24],
-    'num_leaves': [6, 8, 12, 16],
-    'boosting_type': ['gbdt'],
-    'objective': ['binary'],
-    'seed': [500],
-    'colsample_bytree': [0.65, 0.75, 0.8],
-    'subsample': [0.7, 0.75],
-    'reg_alpha': [1, 2, 6],
-    'reg_lambda': [1, 2, 6],
-}
+    data_joined = pd.concat([data_joined, cabins], axis=1)
 
-# Create classifier to use. Note that parameters have to be input manually
-# not as a dict!
-mdl = lgb.LGBMClassifier(boosting_type='gbdt',
-                         objective='binary',
-                         nthread=5,
-                         silent=True,
-                         max_depth=params['max_depth'],
-                         max_bin=params['max_bin'],
-                         subsample_for_bin=params['subsample_for_bin'],
-                         subsample=params['subsample'],
-                         subsample_freq=params['subsample_freq'],
-                         min_split_gain=params['min_split_gain'],
-                         min_child_weight=params['min_child_weight'],
-                         min_child_samples=params['min_child_samples'],
-                         scale_pos_weight=params['scale_pos_weight'])
+    # Process categorical columns
+    # List of categorical columns to recode
+    cat_cols = ['Sex', 'Embarked', 'cabin_letter', 'cabin_number', 'Surname', 'Title']
 
-# To view the default model params:
-mdl.get_params().keys()
+    # Recode
+    for c in cat_cols:
+        # Convert column to pd.Categorical
+        data_joined.loc[:, c] = pd.Categorical(data_joined[c])
+        # Extract the cat.codes and replace the column with these
+        data_joined.loc[:, c] = data_joined[c].cat.codes
+        # Convert the cat codes to categorical...
+        data_joined.loc[:, c] = pd.Categorical(data_joined[c])
 
-# Create the grid
-grid = GridSearchCV(mdl, gridParams, verbose=1, cv=4, n_jobs=-1)
-# Run the grid
-grid.fit(allTrainData, allTrainLabels)
+    # Age
+    # Replace missing age values with median.
+    # See other kernels for more sophisticated ways of doing this!
+    data_joined.loc[data_joined.Age.isnull(), 'Age'] = np.median(data_joined['Age'].loc[data_joined.Age.notnull()])
 
-# Print the best parameters found
-print(grid.best_params_)
-print(grid.best_score_)
+    # Split datasets
+    train_processed = data_joined.iloc[0:n_train, :]
+    test_processed = data_joined.iloc[n_train::, :]
 
-# Using parameters already set above, replace in the best from the grid search
-params['colsample_bytree'] = grid.best_params_['colsample_bytree']
-params['learning_rate'] = grid.best_params_['learning_rate']
-# params['max_bin'] = grid.best_params_['max_bin']
-params['num_leaves'] = grid.best_params_['num_leaves']
-params['reg_alpha'] = grid.best_params_['reg_alpha']
-params['reg_lambda'] = grid.best_params_['reg_lambda']
-params['subsample'] = grid.best_params_['subsample']
-# params['subsample_for_bin'] = grid.best_params_['subsample_for_bin']
+    # Specify columns to drop
+    columns_to_drop = ['Ticket', 'Cabin', 'Name']
 
-# Kit k models with early-stopping on different training/validation splits
-k = 5;
-predsValid = 0
-predsTrain = 0
-predsTest = 0
-for i in range(0, k):
-    print('Fitting model', k)
+    # Split training data in to training and validation sets.
+    # Validation set is used for early stopping.
+    train_split_df, valid_split_df = train_test_split(train_processed, test_size=0.4)
 
-    # Prepare the data set for fold
-    trainData, validData = train_test_split(train, test_size=0.4)
-    trainDataL, trainLabels, trainIDs, trainData = prepLGB(trainData,
-                                                           classCol='Survived',
-                                                           IDCol='PassengerId',
-                                                           fDrop=fDrop)
-    validDataL, validLabels, validIDs, validData = prepLGB(validData,
-                                                           classCol='Survived',
-                                                           IDCol='PassengerId',
-                                                           fDrop=fDrop)
-    # Train     
-    gbm = lgb.train(params,
-                    trainDataL,
-                    100000,
-                    valid_sets=[trainDataL, validDataL],
-                    early_stopping_rounds=50,
-                    verbose_eval=4)
+    # Prepare the data sets
+    (train_lgb_dataset, train_labels,
+     train_ids, train_split_df) = prepare_for_light_gbm(train_split_df, target_col='Survived', id_col='PassengerId',
+                                                        drop_cols=columns_to_drop)
 
-    # Plot importance
-    lgb.plot_importance(gbm)
-    plt.show()
+    (valid_lgb_dataset, valid_labels,
+     valid_ids, valid_split_df) = prepare_for_light_gbm(valid_split_df, target_col='Survived', id_col='PassengerId',
+                                                        drop_cols=columns_to_drop)
 
-    # Predict
-    predsValid += gbm.predict(validData, num_iteration=gbm.best_iteration) / k
-    predsTrain += gbm.predict(trainData, num_iteration=gbm.best_iteration) / k
-    predsTest += gbm.predict(testData, num_iteration=gbm.best_iteration) / k
+    test_lgb_dataset, _, _, test_df = prepare_for_light_gbm(test_processed, target_col='Survived', id_col='PassengerId',
+                                                            drop_cols=columns_to_drop)
 
-# Print assessment
-# assessMod(predsTrain, trainLabels, predsValid=predsValid, yValid= validLabels, 
-#           report=True, plot=True)               
+    # Prepare data set using all the training data
+    (train_valid_lgb_dataset, train_valid_labels,
+     _, train_valid_df) = prepare_for_light_gbm(train_processed, target_col='Survived', id_col='PassengerId',
+                                                drop_cols=columns_to_drop)
 
-# Save submission
-sub = pd.DataFrame()
-sub['PassengerId'] = test['PassengerId']
-sub['Survived'] = np.int32(predsTest > 0.5)
-sub.to_csv('sub2.csv', index=False)
+    # Set params
+    # Scores ~0.784 (without tuning and early stopping)
+    params = {'boosting_type': 'gbdt', 'max_depth': -1, 'objective': 'binary', 'num_leaves': 64,
+              'learning_rate': 0.05, 'max_bin': 512, 'subsample_for_bin': 200, 'subsample': 1, 'subsample_freq': 1,
+              'colsample_bytree': 0.8, 'reg_alpha': 5, 'reg_lambda': 10, 'min_split_gain': 0.5, 'min_child_weight': 1,
+              'min_child_samples': 5, 'scale_pos_weight': 1, 'num_class': 1, 'metric': 'binary_error'}
+
+    # Create parameters to search
+    grid_params = {'learning_rate': [0.01], 'n_estimators': [8, 24], 'num_leaves': [6, 8, 12, 16],
+                   'boosting_type': ['gbdt'], 'objective': ['binary'], 'seed': [500],
+                   'colsample_bytree': [0.65, 0.75, 0.8], 'subsample': [0.7, 0.75], 'reg_alpha': [1, 2, 6],
+                   'reg_lambda': [1, 2, 6]}
+
+    # Create classifier to use. Note that parameters have to be input manually
+    # not as a dict!
+    mod = lgb.LGBMClassifier(**params)
+
+    # To view the default model params:
+    mod.get_params().keys()
+
+    # Create the grid
+    grid = GridSearchCV(mod, param_grid=grid_params, verbose=1, cv=5, n_jobs=-1)
+    # Run the grid
+    grid.fit(train_valid_df, train_valid_labels)
+
+    # Print the best parameters found
+    print(grid.best_params_)
+    print(grid.best_score_)
+
+    # Using parameters already set above, replace in the best from the grid search
+    best_params = {k: grid.best_params_.get(k, v) for k, v in params.items()}
+    best_params['verbosity'] = -1
+
+    # Kit k models with early-stopping on different training/validation splits
+    k = 5
+    valid_preds, train_preds, test_preds = 0, 0, 0
+    for m in range(k):
+        print('Fitting model', m)
+
+        # Prepare the data set for fold
+        train_split_df, valid_split_df = train_test_split(train_processed, test_size=0.4)
+        (train_lgb_dataset, train_labels,
+         train_ids, train_split_df) = prepare_for_light_gbm(train_split_df, target_col='Survived', id_col='PassengerId',
+                                                            drop_cols=columns_to_drop)
+        (valid_lgb_dataset, valid_labels,
+         valid_ids, valid_split_df) = prepare_for_light_gbm(valid_split_df, target_col='Survived', id_col='PassengerId',
+                                                            drop_cols=columns_to_drop)
+        # Train
+        gbm = lgb.train(best_params, train_lgb_dataset, num_boost_round=100000,
+                        valid_sets=[train_lgb_dataset, valid_lgb_dataset],
+                        early_stopping_rounds=50, verbose_eval=50)
+
+        # Plot importance
+        lgb.plot_importance(gbm)
+        plt.show()
+
+        # Predict
+        valid_preds += gbm.predict(valid_split_df, num_iteration=gbm.best_iteration) / k
+        train_preds += gbm.predict(train_split_df, num_iteration=gbm.best_iteration) / k
+        test_preds += gbm.predict(test_df, num_iteration=gbm.best_iteration) / k
+
+    # Save submission
+    sub = pd.DataFrame()
+    sub['PassengerId'] = test_processed['PassengerId']
+    sub['Survived'] = np.int32(test_preds > 0.5)
+    sub.to_csv('sub2.csv', index=False)
